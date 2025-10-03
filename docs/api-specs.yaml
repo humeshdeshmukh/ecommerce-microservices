@@ -1,0 +1,236 @@
+openapi: 3.0.3
+info:
+  title: Ecommerce Microservices API (Consolidated)
+  description: |
+    Consolidated OpenAPI spec for the E-Commerce microservices demonstrator.
+    The API Gateway is the primary server; routes are proxied to individual services.
+  version: "1.0.0"
+servers:
+  - url: https://api.example.com
+    description: API Gateway (replace with real domain or ingress)
+
+tags:
+  - name: Auth
+    description: Authentication & user management
+  - name: Products
+    description: Product catalog
+  - name: Cart
+    description: Shopping cart
+  - name: Orders
+    description: Order processing
+  - name: Payments
+    description: Payment processing
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "64b8f0a1c1b2d3e4f5a6b7c8"
+        email:
+          type: string
+          format: email
+          example: "user@example.com"
+        name:
+          type: string
+          example: "Alice"
+        role:
+          type: string
+          enum: [user, admin]
+          example: user
+
+    AuthRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        expiresIn:
+          type: integer
+          example: 3600
+        user:
+          $ref: '#/components/schemas/User'
+
+    Product:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "prod_001"
+        name:
+          type: string
+          example: "Mechanical Keyboard"
+        description:
+          type: string
+        price:
+          type: number
+          format: float
+          example: 59.99
+        sku:
+          type: string
+        stock:
+          type: integer
+          example: 100
+        createdAt:
+          type: string
+          format: date-time
+
+    CartItem:
+      type: object
+      properties:
+        productId:
+          type: string
+        quantity:
+          type: integer
+          example: 2
+
+    Cart:
+      type: object
+      properties:
+        userId:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartItem'
+        updatedAt:
+          type: string
+          format: date-time
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartItem'
+        total:
+          type: number
+          format: float
+        status:
+          type: string
+          enum: [created, paid, shipped, cancelled]
+        createdAt:
+          type: string
+          format: date-time
+
+    PaymentRequest:
+      type: object
+      required: [orderId, method]
+      properties:
+        orderId:
+          type: string
+        method:
+          type: string
+          enum: [card, wallet, mock]
+        details:
+          type: object
+          description: "Payment method details (e.g., card info) - for mock, can be minimal"
+
+    PaymentResponse:
+      type: object
+      properties:
+        transactionId:
+          type: string
+        status:
+          type: string
+          enum: [success, failed, pending]
+        message:
+          type: string
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+                name: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login and get JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRequest'
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /products:
+    get:
+      tags: [Products]
+      summary: List products
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: free-text search
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Product list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+    post:
+      tags: [Products]
+      summary: Create product (admin)
+      securi

@@ -1,0 +1,49 @@
+{
+  "id": null,
+  "title": "E-Commerce Microservices Dashboard",
+  "tags": ["ecommerce", "microservices"],
+  "timezone": "browser",
+  "schemaVersion": 30,
+  "version": 1,
+  "panels": [
+    {
+      "type": "graph",
+      "title": "HTTP Requests Rate",
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[1m])) by (service)",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "lines": true,
+      "linewidth": 2,
+      "span": 6
+    },
+    {
+      "type": "graph",
+      "title": "Error Rate (5xx)",
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) by (service)",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "lines": true,
+      "linewidth": 2,
+      "span": 6
+    },
+    {
+      "type": "graph",
+      "title": "Response Latency (p95)",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "lines": true,
+      "linewidth": 2,
+      "span": 12
+    }
+  ]
+}

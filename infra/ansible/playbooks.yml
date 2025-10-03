@@ -1,0 +1,51 @@
+# infra/ansible/playbooks.yml
+---
+- name: Deploy ecommerce manifests to Kubernetes
+  hosts: localhost
+  connection: local
+  vars:
+    kubeconfig_path: "{{ lookup('env','KUBECONFIG') | default('~/.kube/config') }}"
+    manifest_dir: "{{ playbook_dir }}/../kubernetes"
+  tasks:
+    - name: Ensure kubectl is available
+      command: kubectl version --client
+      register: kubectl_check
+      ignore_errors: yes
+
+    - name: Fail if kubectl is not found
+      fail:
+        msg: "kubectl not found on control host. Install kubectl before running playbook."
+      when: kubectl_check.rc != 0
+
+    - name: Apply namespace
+      community.kubernetes.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('file', manifest_dir + '/namespace.yaml') | from_yaml }}"
+
+    - name: Apply configmaps
+      command: kubectl --kubeconfig "{{ kubeconfig_path }}" apply -f "{{ manifest_dir }}/configmaps.yaml"
+      register: configmaps_apply
+
+    - name: Apply secrets
+      command: kubectl --kubeconfig "{{ kubeconfig_path }}" apply -f "{{ manifest_dir }}/secrets.yaml"
+      no_log: true
+      register: secrets_apply
+
+    - name: Apply all service manifests
+      command: kubectl --kubeconfig "{{ kubeconfig_path }}" apply -R -f "{{ manifest_dir }}"
+      register: deploy_apply
+
+    - name: Wait for deployments rollout
+      command: >
+        kubectl --kubeconfig "{{ kubeconfig_path }}" -n ecommerce rollout status deploy/{{ item }} --timeout=120s
+      loop:
+        - auth-service
+        - product-service
+        - order-service
+        - cart-service
+        - payment-service
+        - notification-service
+        - api-gateway
+      register: rollout_status
+      ignore_errors: yes

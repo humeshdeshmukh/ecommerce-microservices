@@ -1,0 +1,196 @@
+/*
+  Jenkinsfile - Declarative pipeline for multi-service ecommerce-microservices repo.
+  - Builds, tests, lints each service
+  - Builds Docker images for each service and pushes to registry
+  - Updates k8s manifests and deploys to cluster via KUBECONFIG
+  - Requires Jenkins agent with Docker CLI and kubectl installed
+  - Requires Jenkins credentials:
+      - DOCKER_REGISTRY (username/password)  OR use separate username/password credentials
+      - KUBE_CONFIG (Secret text containing base64-encoded kubeconfig)
+*/
+
+pipeline {
+  agent any
+
+  environment {
+    // Customize these values or set as Jenkins credentials
+    REGISTRY = "${env.REGISTRY ?: 'docker.io/humeshdeshmukh'}"  // example: docker.io/username or ECR URL
+    REGISTRY_CRED_ID = "docker-registry-credentials"            // Jenkins credential ID (username/password)
+    KUBE_CONFIG_CRED_ID = "kubeconfig-base64"                   // Jenkins secret text containing base64 KUBECONFIG
+    IMAGE_TAG = "${env.BUILD_TAG ?: env.GIT_COMMIT.take(8)}"    // Use short commit SHA or Jenkins build tag
+    SERVICES = "auth-service product-service order-service cart-service payment-service notification-service api-gateway"
+    WORKDIR = '.' // root of repo
+  }
+
+  options {
+    // Keep a small history, timeout to prevent runaway builds
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+    timeout(time: 60, unit: 'MINUTES')
+    ansiColor('xterm')
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        echo "Checking out repository..."
+        checkout scm
+      }
+    }
+
+    stage('Prepare') {
+      steps {
+        echo "Prepare: show which services will be processed"
+        sh """
+          echo "IMAGE_TAG=${IMAGE_TAG}"
+          echo "REGISTRY=${REGISTRY}"
+          echo "Services: ${SERVICES}"
+        """
+      }
+    }
+
+    stage('Lint & Unit Tests') {
+      parallel {
+        stage('Node Lint & Tests (all services)') {
+          agent { label 'docker' } // choose an agent with node/docker
+          steps {
+            // This assumes package.json scripts: "lint" and "test" exist for each service
+            sh """
+            set -e
+            for svc in ${SERVICES}; do
+              if [ -f services/$svc/package.json ]; then
+                echo "==> Lint & Test $svc"
+                cd services/$svc
+                # install dependencies (use cache in production)
+                if [ -f package-lock.json ]; then npm ci; else npm install; fi
+                # lint and test if scripts present
+                if npm run | grep -q 'lint'; then npm run lint || true; fi
+                if npm run | grep -q 'test'; then npm run test || true; fi
+                cd - > /dev/null
+              else
+                echo "No package.json for $svc, skipping lint/test"
+              fi
+            done
+            """
+          }
+        }
+      }
+    }
+
+    stage('Build & Push Docker Images') {
+      agent { label 'docker' }
+      environment {
+        DOCKER_BUILDKIT = '1'
+      }
+      steps {
+        script {
+          // use docker login via Jenkins credentials
+          withCredentials([usernamePassword(credentialsId: env.REGISTRY_CRED_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PSW')]) {
+            sh '''
+              echo "Logging into registry ${REGISTRY}"
+              echo "${DOCKER_PSW}" | docker login ${REGISTRY} -u "${DOCKER_USER}" --password-stdin
+            '''
+          }
+
+          // Build images for each service
+          sh '''
+            set -e
+            for svc in ${SERVICES}; do
+              if [ -f services/$svc/Dockerfile ]; then
+                IMAGE_NAME="${REGISTRY}/${svc}:${IMAGE_TAG}"
+                echo "Building ${IMAGE_NAME}"
+                docker build -t ${IMAGE_NAME} services/$svc
+                echo "Pushing ${IMAGE_NAME}"
+                docker push ${IMAGE_NAME}
+                # store last pushed image name to a small file for deploy stage
+                echo "${IMAGE_NAME}" >> pushed-images.txt
+              else
+                echo "No Dockerfile for services/$svc - skipping"
+              fi
+            done
+          '''
+        }
+      }
+      post {
+        always {
+          sh 'echo "Built images:"; cat pushed-images.txt || true'
+          // Logout
+          sh 'docker logout ${REGISTRY} || true'
+        }
+      }
+    }
+
+    stage('Deploy to Kubernetes') {
+      agent { label 'kubectl' } // agent with kubectl
+      steps {
+        script {
+          // Retrieve kubeconfig from Jenkins credential and decode it
+          withCredentials([string(credentialsId: env.KUBE_CONFIG_CRED_ID, variable: 'KUBECONFIG_B64')]) {
+            sh '''
+              echo "Decoding KUBECONFIG..."
+              echo "${KUBECONFIG_B64}" | base64 --decode > ./kubeconfig
+              export KUBECONFIG=$PWD/kubeconfig
+              kubectl version --client
+            '''
+          }
+
+          // Replace image tags inside k8s manifests and apply.
+          // This approach assumes you have deployment YAMLs with image placeholders like: IMAGE_REPLACE_AUTH_SERVICE
+          sh '''
+            set -e
+            echo "Applying Kubernetes manifests with new image tags..."
+            while read -r img; do
+              # img format: <registry>/<service>:<tag>
+              svc=$(basename $(echo $img | cut -d':' -f1))
+              svc_name=${svc#*/} # remove registry prefix
+              echo "Updating manifests: service=$svc_name image=$img"
+              # simple sed replacement - look for image: .*<svc_name>.* and replace with new image
+              # Backup manifests before changing
+              cp -r infra/kubernetes infra/kubernetes.tmp || true
+              # Replace any occurrence of IMAGE_${svc_name^^} or plain image lines matching svc_name
+              # Use envsubst-friendly placeholder: IMAGE_${svc_name^^} in your YAML files.
+              # Fallback: replace by searching for service name in image line
+              sed -i "s|IMAGE_${svc_name^^}|${img}|g" infra/kubernetes/*.yaml || true
+              # Generic replacement: replace image lines that contain ${svc_name} with new image
+              sed -i -E "s|(image:\\s*).*${svc_name}(:[a-zA-Z0-9._-]*)?\\b|\\1${img}|g" infra/kubernetes/*.yaml || true
+            done < pushed-images.txt
+
+            # apply manifests
+            kubectl apply -f infra/kubernetes/namespace.yaml || true
+            kubectl apply -f infra/kubernetes/configmaps.yaml || true
+            kubectl apply -f infra/kubernetes/secrets.yaml || true
+            kubectl apply -R -f infra/kubernetes/
+          '''
+        }
+      }
+    }
+
+    stage('Post-deploy Health Check') {
+      agent { label 'kubectl' }
+      steps {
+        sh '''
+          set -e
+          export KUBECONFIG=$PWD/kubeconfig
+          echo "Waiting for deployments rollout..."
+          for deployment in auth-service product-service order-service cart-service payment-service notification-service api-gateway; do
+            ns=$(yq e '.metadata.namespace' infra/kubernetes/namespace.yaml 2>/dev/null || echo default)
+            echo "Checking rollout status for $deployment"
+            kubectl -n ${ns:-default} rollout status deploy/$deployment --timeout=120s || echo "rollout status check failed for $deployment"
+          done
+        '''
+      }
+    }
+  }
+
+  post {
+    failure {
+      echo "Pipeline failed — consider inspecting logs and rolling back"
+    }
+    success {
+      echo "Pipeline completed successfully"
+    }
+    cleanup {
+      sh 'rm -f ./kubeconfig || true'
+    }
+  }
+}
